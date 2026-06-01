@@ -1,0 +1,65 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-staging:
+    name: Build & Deploy (staging)
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: packages/api
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/bluecollar-api:staging-${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/bluecollar-api:staging-latest
+
+      - name: Apply Terraform (staging)
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - run: terraform init
+        working-directory: deploy/terraform/environments/staging
+
+      - run: terraform apply -auto-approve
+        working-directory: deploy/terraform/environments/staging
+        env:
+          TF_VAR_db_username: ${{ secrets.STAGING_DB_USERNAME }}
+          TF_VAR_db_password: ${{ secrets.STAGING_DB_PASSWORD }}
+
+      - name: Run migrations
+        run: |
+          npm ci
+          DATABASE_URL="${{ secrets.STAGING_DATABASE_URL }}" npx prisma migrate deploy
+        working-directory: packages/api
+
+      - name: Seed staging data
+        run: |
+          DATABASE_URL="${{ secrets.STAGING_DATABASE_URL }}" npm run seed
+        working-directory: packages/api
+
+      - name: Smoke test
+        run: bash deploy/scripts/smoke-tests.sh https://staging-api.bluecollar.app
